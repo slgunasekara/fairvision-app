@@ -23,13 +23,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# MODEL URLS
-# Set these in Streamlit Cloud → Settings → Secrets:
-#   URL_BASELINE = "https://huggingface.co/.../baseline_model.pth"
-#   URL_WEIGHTED = "https://huggingface.co/.../model_weighted.pth"
-#   URL_BALANCED = "https://huggingface.co/.../model_balanced.pth"
-#
-# OR place .pth files directly in the same folder as this script.
+# MODEL URLS (optional - only if not in same folder)
 # ==========================================
 MODEL_URLS = {
     "baseline_model.pth": os.getenv("URL_BASELINE", ""),
@@ -48,7 +42,7 @@ def download_model(filename: str) -> bool:
         return False
     try:
         import requests
-        with st.spinner(f"Downloading {filename} from HuggingFace Hub..."):
+        with st.spinner(f"Downloading {filename}..."):
             r = requests.get(url, timeout=180, stream=True)
             r.raise_for_status()
             with open(filename, "wb") as f:
@@ -61,45 +55,67 @@ def download_model(filename: str) -> bool:
 
 
 # ==========================================
-# CNN MODEL (must match notebook exactly)
+# CNN MODEL — matches FairFaceCNN in notebook exactly
+# 4 blocks + GAP + FC(256->512->9)
 # ==========================================
 class FairVisionCNN(nn.Module):
     def __init__(self, num_classes=9):
         super(FairVisionCNN, self).__init__()
+
         self.block1 = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
             nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2), nn.Dropout2d(0.25)
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
         )
         self.block2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2), nn.Dropout2d(0.25)
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
         )
         self.block3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
             nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, 2), nn.Dropout2d(0.25)
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
         )
+        self.block4 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
+        )
+        self.gap = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128 * 8 * 8, 256),
+            nn.Linear(256, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
-            nn.Linear(256, num_classes)
+            nn.Linear(512, num_classes),
         )
 
     def forward(self, x):
         x = self.block1(x)
         x = self.block2(x)
         x = self.block3(x)
-        return self.classifier(x)
+        x = self.block4(x)
+        x = self.gap(x)
+        x = self.classifier(x)
+        return x
 
 
 AGE_NAMES = ['0-2', '3-9', '10-19', '20-29', '30-39',
@@ -117,9 +133,9 @@ def load_model(model_path: str):
 
     try:
         state = torch.load(model_path, map_location="cpu")
-        # Handle checkpoint format (has model_state_dict key)
-        if "model_state_dict" in state:
-           state = state["model_state_dict"]
+        # Handle checkpoint format saved with extra keys
+        if isinstance(state, dict) and "model_state_dict" in state:
+            state = state["model_state_dict"]
         model.load_state_dict(state)
         model.eval()
         return model, True, "Model loaded successfully."
@@ -128,7 +144,7 @@ def load_model(model_path: str):
 
 
 # ==========================================
-# IMAGE TRANSFORM (matches notebook val_transform)
+# IMAGE TRANSFORM (matches notebook eval_transform)
 # ==========================================
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
@@ -281,20 +297,21 @@ st.divider()
 # ==========================================
 with st.expander("Model Architecture Details"):
     st.markdown("""
-    **FairVisionCNN** — Custom 3-block VGG-style CNN trained entirely from scratch.
+    **FairVisionCNN** — Custom 4-block CNN trained entirely from scratch using PyTorch.
 
     | Component | Configuration |
     |-----------|--------------|
     | Block 1 | Conv(3→32)×2, BatchNorm, ReLU, MaxPool, Dropout2d(0.25) |
     | Block 2 | Conv(32→64)×2, BatchNorm, ReLU, MaxPool, Dropout2d(0.25) |
     | Block 3 | Conv(64→128)×2, BatchNorm, ReLU, MaxPool, Dropout2d(0.25) |
-    | Classifier | FC(8192→256), ReLU, Dropout(0.5), FC(256→9) |
+    | Block 4 | Conv(128→256), BatchNorm, ReLU, MaxPool, Dropout2d(0.25) |
+    | GAP | AdaptiveAvgPool2d(1) |
+    | Classifier | FC(256→512), ReLU, Dropout(0.5), FC(512→9) |
     | Input size | 3 × 64 × 64 RGB |
     | Output | 9 age-group logits |
-    | Parameters | ~1.1M trainable |
 
-    **Training setup:** Adam (lr=0.001, weight_decay=1e-4), StepLR (step=7, gamma=0.5),
-    20 epochs, batch size 64. No pretrained weights used.
+    **Training setup:** AdamW (lr=0.001, weight_decay=1e-4), ReduceLROnPlateau,
+    batch size 64. No pretrained weights used.
 
     **Dataset:** FairFace 0.25 config — 86,744 training / 10,954 test samples.
     """)
