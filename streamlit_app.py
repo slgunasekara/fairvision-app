@@ -117,6 +117,9 @@ def load_model(model_path: str):
 
     try:
         state = torch.load(model_path, map_location="cpu")
+        # Handle checkpoint format (has model_state_dict key)
+        if "model_state_dict" in state:
+           state = state["model_state_dict"]
         model.load_state_dict(state)
         model.eval()
         return model, True, "Model loaded successfully."
